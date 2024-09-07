@@ -1,0 +1,688 @@
+---
+title: "NYPD Shoting Incident Data Report"
+subtitle: "DTSA 5301 Data Science as a Field"
+author: "MS Data Science, University of Colorado Boulder"
+date: "2024-08-20"
+output: pdf_document
+---
+
+# Setup Knit Options
+
+echo = true will display code chunks in the output
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Libraries
+
+```{r}
+library(tidyverse)
+library(conflicted)
+library(lubridate)
+library(caret)
+library(xgboost)
+library(pROC)
+library(PRROC)
+library(MLmetrics)
+library(glmnet)
+library(car)
+library(smotefamily)
+library(ROSE)
+```
+
+# Read Dataset
+
+Download NYPD Shooting csv dataset and store in a data frame
+
+```{r import_data}
+url <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+data <- read_csv(url)
+```
+
+# Inspect Data
+
+Display raw data structure
+
+```{r}
+# display structure
+str(data)
+```
+
+Here we can see the first 5 rows of the data and can page to the right to see all the columns.
+
+```{r}
+# display first 5 rows
+head(data)
+```
+
+This will display the summary statistics of the data.
+If the data is numerical it will produce the mean, median, min, max, and quartiles.
+If the data is categorical it will produce the counts of each category.
+
+```{r}
+# display summary statistics
+summary(data)
+```
+
+Above we can see three of the columns are lowercase and the rest are uppercase.
+So we now can rename those three columns to uppercase for consistency.
+
+```{r}
+# rename columns to uppercase for consistency
+colnames(data)[colnames(data) == "Latitude"] <- "LATITUDE"
+colnames(data)[colnames(data) == "Longitude"] <- "LONGITUDE"
+colnames(data)[colnames(data) == "Lon_Lat"] <- "LON_LAT"
+
+# display first 5 rows
+head(data)
+```
+
+# Missing Values
+
+This is checking for missing values in the data, of special type NA.
+
+```{r}
+# display counts of missing values
+colSums(is.na(data))
+```
+
+Above we can see several columns have a large number of missing counts.
+Next we will display the percentage of missing values in each column to understand the ratio of missing values, rather than just the counts.
+
+```{r}
+# display percentage of missing values
+round(colMeans(is.na(data)), 2)
+```
+
+We can see that the columns LOC_OF_OCCUR_DESC, LOC_CLASSFCTN_DESC, LOCATION_DESC, PERP_AGE_GROUP, PERP_SEX, and PERP_RACE all have a high percentage of missing values.
+We will need a strategy to handle these missing values soon.
+
+Here we will display the counts of each category in the categorical features.
+
+```{r}
+# print counts of categorical features
+printCountsCategoricalFeatures = function(data, feature) {
+    print(feature)
+    print(table(addNA(data[[feature]]), useNA = "ifany"))
+    cat("\n")
+}
+```
+
+```{r}
+# print counts of categorical features, with missing values
+printCountsCategoricalFeatures(data, "LOC_OF_OCCUR_DESC")
+printCountsCategoricalFeatures(data, "JURISDICTION_CODE")
+printCountsCategoricalFeatures(data, "LOC_CLASSFCTN_DESC")
+printCountsCategoricalFeatures(data, "LOCATION_DESC")
+printCountsCategoricalFeatures(data, "PERP_AGE_GROUP")
+printCountsCategoricalFeatures(data, "PERP_SEX")
+printCountsCategoricalFeatures(data, "PERP_RACE")
+printCountsCategoricalFeatures(data, "BORO")
+printCountsCategoricalFeatures(data, "PRECINCT")
+printCountsCategoricalFeatures(data, "STATISTICAL_MURDER_FLAG")
+printCountsCategoricalFeatures(data, "VIC_AGE_GROUP")
+printCountsCategoricalFeatures(data, "VIC_SEX")
+printCountsCategoricalFeatures(data, "VIC_RACE")
+```
+
+Above we can see which categorical variables have the least/most categories and how evenly distributed they may be.
+We also see that there are a few values of "(null)" which is a character string value coming from the data set, and not the datatype NA.
+
+# Impute Categorical Features
+
+Next we will impute (fill in) the missing values for the categorical features.
+This function will replace all NA datatypes with the character value of "UNKNOWN" for a new category.
+This is done so the values are not missing which would prevent the models from running and force us to remove the records from the training.
+
+```{r}
+cleanCategoricalFeature = function(feature, outlier_list = c()) {
+  outlier_found <- length(outlier_list > 0) & feature %in% outlier_list
+  return(replace(feature, is.na(feature) | outlier_found == TRUE, "UNKNOWN"))
+}
+```
+
+```{r}
+# replace missing values with "Unknown" for categorical features
+data$LOC_OF_OCCUR_DESC <- cleanCategoricalFeature(data$LOC_OF_OCCUR_DESC)
+data$JURISDICTION_CODE <- cleanCategoricalFeature(data$JURISDICTION_CODE)
+data$LOC_CLASSFCTN_DESC <- cleanCategoricalFeature(data$LOC_CLASSFCTN_DESC, c("(null)"))
+data$LOCATION_DESC <- cleanCategoricalFeature(data$LOCATION_DESC, c("(null)"))
+data$PERP_AGE_GROUP <- cleanCategoricalFeature(data$PERP_AGE_GROUP, c("(null)", "1020", "1028", "224", "940"))
+data$PERP_SEX <- cleanCategoricalFeature(data$PERP_SEX, c("(null)", "U"))
+data$PERP_RACE <- cleanCategoricalFeature(data$PERP_RACE, c("(null)"))
+data$VIC_AGE_GROUP <- cleanCategoricalFeature(data$VIC_AGE_GROUP, c("(null)", "1022"))
+data$VIC_SEX <- cleanCategoricalFeature(data$VIC_SEX, c("U"))
+```
+
+```{r}
+# print counts of categorical features, with missing values
+printCountsCategoricalFeatures(data, "LOC_OF_OCCUR_DESC")
+printCountsCategoricalFeatures(data, "JURISDICTION_CODE")
+printCountsCategoricalFeatures(data, "LOC_CLASSFCTN_DESC")
+printCountsCategoricalFeatures(data, "LOCATION_DESC")
+printCountsCategoricalFeatures(data, "PERP_AGE_GROUP")
+printCountsCategoricalFeatures(data, "PERP_SEX")
+printCountsCategoricalFeatures(data, "PERP_RACE")
+printCountsCategoricalFeatures(data, "BORO")
+printCountsCategoricalFeatures(data, "PRECINCT")
+printCountsCategoricalFeatures(data, "STATISTICAL_MURDER_FLAG")
+printCountsCategoricalFeatures(data, "VIC_AGE_GROUP")
+printCountsCategoricalFeatures(data, "VIC_SEX")
+printCountsCategoricalFeatures(data, "VIC_RACE")
+```
+
+After printing out the category counts above we can see that there are no more NA data types and instead have been converted into "UNKNOWN" categories.
+Next we will drop the UNKNOWN cagtegory from the JURISDICTION_CODE feature as it only has a count of 2 which is not enough to train a model.
+
+```{r}
+# drop records with low category counts
+data <- dplyr::filter(data, JURISDICTION_CODE != "UNKNOWN")
+printCountsCategoricalFeatures(data, "JURISDICTION_CODE")
+```
+
+For this continuous feature, we will get the counts of all NA vs not NA values.
+
+```{r}
+# print counts of NA vs not NA for continuous features
+printCountsContinuousFeatures = function(data, feature) {
+    na_count <- sum(is.na(data[[feature]]))
+    non_na_count <- sum(!is.na(data[[feature]]))
+    print(feature)
+    cat("NA:", na_count, "    Not NA:", non_na_count, "\n\n")
+}
+```
+
+```{r}
+# print counts of NA vs not NA for continuous features
+printCountsContinuousFeatures(data, "LATITUDE")
+printCountsContinuousFeatures(data, "LONGITUDE")
+printCountsContinuousFeatures(data, "LON_LAT")
+```
+
+We can see that most of the records for this continuous feature have a not NA value.
+
+# Impute Continuous Features
+
+For continuous features, we will replace the missing values with the mean of the feature.
+This is a common strategy for continuous features as it is a simple way to fill in the missing values.
+Also from the large counts above, we know this distribution will approach a normal distribution and the mean is a good estimate for this type of distribution as the distribution curve is naturally forming around the mean value.
+
+```{r}
+# replace missing values with mean for continuous features
+lon_mean = mean(data$LONGITUDE, na.rm = TRUE)
+lat_mean = mean(data$LATITUDE, na.rm = TRUE)
+data$LONGITUDE <- ifelse(is.na(data$LONGITUDE), lon_mean, data$LONGITUDE)
+data$LATITUDE <- ifelse(is.na(data$LATITUDE), lat_mean, data$LATITUDE)
+data$LON_LAT <- ifelse(is.na(data$LON_LAT), paste("POINT (", lon_mean, lat_mean, ")"), data$LON_LAT)
+```
+
+```{r}
+# print counts of NA vs not NA for continuous features
+printCountsContinuousFeatures(data, "LATITUDE")
+printCountsContinuousFeatures(data, "LONGITUDE")
+printCountsContinuousFeatures(data, "LON_LAT")
+```
+
+Above we can see that there are no longer any missing values for the continuous features.
+Next we will clean the date and time features with some built in functions from the lubridate package.
+
+# Clean Date and Time
+
+```{r}
+# combine date and time into new date features
+data$OCCUR_DATE <- mdy(data$OCCUR_DATE)
+data$OCCUR_DATE_TIME <- ymd_hms(paste(data$OCCUR_DATE, data$OCCUR_TIME))
+data$OCCUR_HOUR <- hour(data$OCCUR_TIME)
+data$OCCUR_DAY_OF_WEEK <- wday(data$OCCUR_DATE, week_start = 1)
+data$OCCUR_MONTH <- month(data$OCCUR_DATE)
+head(data)
+```
+
+Above we can see that we created new features OCCUR_DATE_TIME, OCCUR_HOUR, OCCUR_DAY_OF_WEEK, and OCCUR_MONTH.
+Later we will see that confirm if these new features are useful for the model.
+The hypothesis is that the time of day, day of week, and month may have an impact on the number of incidents.
+
+Here is a check for any duplicate records in the data set which could cause issues training the model.
+
+```{r}
+# check for duplicates
+sum(duplicated(data))
+```
+
+# Visualize Data
+
+Next we start to visualize the data to understand the distribution of the data and relationships between features.
+First we look at the number of incidents per day over several years.
+  
+```{r}
+# Plot the number of incidents over time
+ggplot(data, aes(x = OCCUR_DATE)) +
+  geom_histogram(binwidth = 30) +
+  labs(title = "Number of Incidents Over Time", x = "Date", y = "Number of Incidents")
+```
+
+On first glance this data appears to be cyclic which is likely caused by the date, or maybe the month of the year.
+This could have many causes including weather, number of hours daylight, number of people outside, etc.
+Next we will look at number of incidents by the borough to see if any stand out compared to the others.
+
+```{r}
+# Plot incidents by borough
+ggplot(data, aes(x = BORO)) +
+  geom_bar() +
+  labs(title = "Number of Incidents by Borough", x = "Borough", y = "Number of Incidents")
+```
+
+We can see that Brooklyn and Bronx have the highest number of incidents, and Staten Island with the fewest.
+Next we will get more specific in the location and look at the number of incidents by location description.
+
+```{r}
+# Plot incidents by location description
+ggplot(data, aes(x = LOCATION_DESC)) +
+  geom_bar() +
+  labs(title = "Number of Incidents by Location Description", x = "Location Description", y = "Number of Incidents") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+There is an obvious outlier in the data with the category "UNKNOWN" which is our placeholder for missing values.
+Next let's plot this again, ignoring the UNKNOWNS so we can see the range of the other values.
+
+```{r}
+# Plot incidents by location description, ignoring UNKNOWN
+ggplot(data = subset(data, LOCATION_DESC != "UNKNOWN"), aes(x = LOCATION_DESC)) +
+  geom_bar() +
+  labs(title = "Number of Incidents by Known Location Description", x = "Location Description", y = "Number of Incidents") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Even further, let's plot this one more time removing the two highest values that remain above: "MULTI DWELL - APT BUILD", "MULTI DWELL - PUBLIC HOUS."
+
+```{r}
+# Plot incidents by location description, ignoring UNKNOWN, MULTI DWELL - APT BUILD, and MULTI DWELL - PUBLIC HOUS
+ggplot(data = subset(data, LOCATION_DESC != "UNKNOWN" & LOCATION_DESC != "MULTI DWELL - APT BUILD" & LOCATION_DESC != "MULTI DWELL - PUBLIC HOUS"), aes(x = LOCATION_DESC)) +
+  geom_bar() +
+  labs(title = "Number of Incidents by Known Location Description", x = "Location Description", y = "Number of Incidents") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+We could continue this further to determine the range of the remaining values but we need to keep in mind the number of incidents per category is starting to become negligible compared to the highest frequency values removed already.
+Next we will create a scatter plot of the latitude and longitude coordinates where each point is colored by the race of the perpetrator.
+  
+```{r}
+# create scatter plot for latitude and longitude coordinates of incidents
+ggplot(data) +
+  geom_point(mapping = aes(x = LONGITUDE, y = LATITUDE, color = PERP_RACE)) +
+  labs(title = "Incident Locations", x = "Longitude", y = "Latitude") +
+  theme_minimal()
+```
+
+Next we will create a similar scatter plot of the latitude and longitude coordinates, but this time where each point is colored by the race of the victim.
+
+```{r}
+# create scatter plot for latitude and longitude coordinates of incidents
+ggplot(data) +
+  geom_point(mapping = aes(x = LONGITUDE, y = LATITUDE, color = VIC_RACE)) +
+  labs(title = "Incident Locations", x = "Longitude", y = "Latitude") +
+  theme_minimal()
+```
+
+Comparing the two scatter plots, the top graph of PERP_RACE has a significant amount of blue "UNKNOWN" points which line up pretty well with the green "BLACK" points in the bottom graph of VIC_RACE.
+The other colors also seem to line up fairly well matched, pink on top of pink, purple on top of purple, etc.
+This would indicate that most incidents involve both the perpetrator and victim being the race.
+If we assume this trend can be extrapolated, we can hypothesize the "UNKNOWN" perpetrators are likely "BLACK" like the victims.
+However, we must be careful not to make assumptions as there are many other factors that could be at play here and we need to caution over generalizing the data.
+  
+# Analyze Data
+
+Next we will start to analyze the relationships between the features in the data.
+First we will look at the relationship between the sex of the perpetrator and victim.
+  
+```{r}
+# create data frame to analyze relationship between sex
+sex_df <- as.data.frame(table(data$PERP_SEX, data$VIC_SEX))
+colnames(sex_df) <- c("PERP_SEX", "VIC_SEX", "n")
+sex_df
+```
+
+Here we will look at the relationship between the race of the perpetrator and victim.
+
+```{r}
+# create data frame to analyze relationship between race
+race_df <- as.data.frame(table(data$PERP_RACE, data$VIC_RACE))
+colnames(race_df) <- c("PERP_RACE", "VIC_RACE", "n")
+race_df
+```
+
+Lastly we will look at the relationship between the age of the perpetrator and victim.
+
+```{r}
+# create data frame to analyze relationship between age
+age_df <- as.data.frame(table(data$PERP_AGE_GROUP, data$VIC_AGE_GROUP))
+colnames(age_df) <- c("PERP_AGE_GROUP", "VIC_AGE_GROUP", "n")
+age_df
+```
+
+Next we will visualize these relationships with bar plots, starting with the sex relationship.
+
+```{r}
+# plot relationship between perpetrator and victim sex
+ggplot(sex_df, aes(x = PERP_SEX, y = n, fill = VIC_SEX)) +
+  geom_bar(stat = "identity", position="dodge") +
+  labs(title = "Sex Relationship", x = "Perpetrator Sex", y = "Incidents", fill = "Victim Sex") +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+Above we can see there is a clear relationship between MALE perpetrators and victims.
+We can also see there are many incidents where the perpetrator is UNKNOWN and the victim is MALE.
+We could reach a similar conclusion as before that the UNKNOWN perpetrators are likely MALE.
+However, must be cautious again to not over generalize the data and make assumptions.
+We can also see there are very few incidents where the perpetrator and victim are both FEMALE, especially compared to the other categories.
+
+Next we will plot the relationship between race.
+
+```{r}
+# plot relationship between perpetrator and victim race
+ggplot(race_df, aes(x = PERP_RACE, y = n, fill = VIC_RACE)) +
+  geom_bar(stat = "identity", position="dodge") +
+  labs(title = "Race Relationship", x = "Perpetrator Race", y = "Incidents", fill = "Victim Race") +
+  theme_minimal() +
+  theme(legend.position = "right", axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Above we can see there is a clear relationship between BLACK perpetrators and BLACK victims.
+We can also see there is a significant number of incidents where the perpetrator is UNKNOWN and the victim is BLACK.
+Again, we could reach a similar conclusion as before that the UNKNOWN perpetrators are likely BLACK but we must be cautious to not over generalize the data and make assumptions.
+Besides those two relationships, we can see there are very few incidents among the other categories.
+
+Next we will plot the relationship between age.
+
+```{r}
+# plot relationship between perpetrator and victim age
+ggplot(age_df, aes(x = PERP_AGE_GROUP, y = n, fill = VIC_AGE_GROUP)) +
+  geom_bar(stat = "identity", position="dodge") +
+  labs(title = "Age Relationship", x = "Perpetrator Age", y = "Incidents", fill = "Victim Age") +
+  theme_minimal() +
+  theme(legend.position = "right", plot.title = element_text(hjust = 0.5))
+```
+
+Above we can see there might be a relationship between perpetrator and victim age but it is not as clear as the other relationships.
+Ignoring the unknown perpetrator relationships, the majority of the incidents are between the age groups 18-24 and 25-44.
+However, we can see that the unknown perpetrators also have the highest occurrence of incidents with the 18-24 and 25-44 age groups.
+Again we could reach a similar conclusion as before with the various examples but we must be cautious not to over generalize the data and make assumptions.
+
+Next we will look at the relationship between the hour of the day and the number of incidents.
+
+```{r}
+# plot relationship between hour of day and incidents
+hour_data <- data %>%
+  count(OCCUR_HOUR)
+ggplot(hour_data, aes(x = OCCUR_HOUR, y = n)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Hour of Day to Incidents", x = "Hour of Day", y = "Incidents") +
+  theme(plot.title = element_text(hjust = 0.5), axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_x_continuous(breaks = 0:23, labels = c("12AM", "1AM", "2AM", "3AM", "4AM", "5AM", "6AM", "7AM", "8AM", "9AM", "10AM", "11AM", "12PM", "1PM", "2PM", "3PM", "4PM", "5PM", "6PM", "7PM", "8PM", "9PM", "10PM", "11PM"))
+```
+
+Above we can see there is a clear relationship between the hour of the day and the number of incidents.
+The greatest number of incidents occur over night and drop off during the day.
+This is a potentially good feature to use in the model.
+
+Next we will look at the relationship between the day of the week and the number of incidents.
+
+```{r}
+# plot relationship between day of week to incidents
+day_of_week_data <- data %>%
+  count(OCCUR_DAY_OF_WEEK)
+ggplot(day_of_week_data, aes(x = OCCUR_DAY_OF_WEEK, y = n)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Day of Week to Incidents", x = "Day of Week", y = "Incidents") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks = 1:7, labels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+```
+
+Above we can see there is a clear relationship between the day of the week and the number of incidents, with the greatest number of incidents occurring on the weekends and dropping off during the week.
+Next we will look at the relationship between the month of the year and the number of incidents.
+
+```{r}
+# plot relationship between month to incidents
+month_data <- data %>%
+  count(OCCUR_MONTH)
+ggplot(month_data, aes(x = OCCUR_MONTH, y = n)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Month to Incidents", x = "Month", y = "Incidents") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks = 1:12, labels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+```
+Above we can see a relationship between the month of the year and the number of incidents, where the greatest number of incidents occur in the summer months and drop off during the winter months.
+
+# Features for Model
+
+Now we will start to prepare the model by selecting the features we want to use.
+These vectors of column names will come in handy later when we preprocess the data for the model.
+We break these up into different types of features: nominal, ordinal, numeric, numeric factor, logical, and date features.
+This is done to help us understand the data better and to help us decide how to preprocess the data for the model.
+
+```{r}
+# define features
+nominal_features <- c(
+   "JURISDICTION_CODE" # nominal
+  ,"VIC_AGE_GROUP"     # nominal
+)
+
+# ordinal features
+ordinal_features <- c()
+
+# numeric features
+numeric_features <- c(
+  
+)
+
+# numeric factor features
+numeric_factor_features <- c(
+   "OCCUR_HOUR"        # numeric
+  ,"OCCUR_DAY_OF_WEEK" # numeric
+  ,"OCCUR_MONTH"       # numeric
+)
+
+# logical features
+logical_features <- c()
+
+# date features
+date_features <- c()
+
+# target variable
+target <- "STATISTICAL_MURDER_FLAG"
+```
+
+# Preprocess Data for Model
+
+Next we begin to preprocess the data for the model.
+We start by filtering down the data frame with only the features of interest and the target variable.
+Then we need to convert some data types to something that can be used by the model.
+The nominal features need to be turned into factors, and the ordinal features need to be turned into ordered factors.
+The numeric features get turned into factors, and so does the target variable which contains TRUE/FALSE values.
+We then split the data set into training and test sets, where 80% of the data is used for training the model and 20% is used for testing the model.
+We need to be careful to align the factors between the training and test set as the randomness of the split can produce categorical values in the test set that do not exist in the training set which will cause an error.
+Lastly we print the train and test sets for inspection and validation before modeling.
+
+```{r}
+# select the relevant columns
+model_data <- data %>%
+  select(all_of(c(nominal_features, ordinal_features, numeric_features, numeric_factor_features, logical_features, date_features, target)))
+
+# convert nominal features to factors
+model_data <- model_data %>%
+  mutate(across(all_of(nominal_features), as.factor))
+
+# convert ordinal features to ordered factors
+if (!is.null(ordinal_features)) {
+  model_data <- model_data %>%
+    mutate(across(all_of(ordinal_features), ~factor(.x, ordered = TRUE)))
+}
+
+# convert numeric features to factors
+if (!is.null(numeric_factor_features)) {
+  model_data <- model_data %>%
+    mutate(across(all_of(numeric_factor_features), as.factor))
+}
+
+# convert target variable to factor
+model_data[[target]] <- factor(model_data[[target]], levels = c(FALSE, TRUE), labels = c("No", "Yes"))
+
+# split data into training and test sets
+set.seed(123)
+splitIndex <- createDataPartition(model_data[[target]], p = 0.8, list = FALSE)
+train_data <- model_data[splitIndex, ]
+test_data <- model_data[-splitIndex, ]
+
+# remove near zero variance predictors
+nzv <- nearZeroVar(train_data, saveMetrics = TRUE)
+train_data <- train_data[, !nzv$nzv]
+test_data <- test_data[, colnames(test_data) %in% colnames(train_data)]
+
+# align factors in test set with training set
+for (col in names(test_data)) {
+  if (is.factor(train_data[[col]])) {
+    test_data[[col]] <- factor(test_data[[col]], levels = levels(train_data[[col]]))
+  }
+}
+
+# print train and test sets before modeling
+sapply(train_data, class)
+summary(train_data)
+```
+
+# Train Logistic Regression Model
+
+Next we train a simple logistic regression model which is a classification model that produces a binary output.
+This model is a good starting point for classification problems and is easy to interpret.
+We will train the model on the training data and then evaluate the model on the test data.
+
+```{r}
+# train model
+formula <- as.formula(paste(target, "~ ."))
+train_data <- ovun.sample(formula, data = train_data, method = "under")$data
+model <- glm(formula, data = train_data, family = "binomial")
+```
+
+# Evaluate Model
+
+Next we evaluate the model on the test data to see how well it performs on unseen data.
+First we get the probabilities of each prediction and then evaluate the classification based on a threshold of 0.5.
+We then evaluate the model using a variety of metrics including a confusion matrix, accuracy, precision, recall, F1 score, ROC AUC, and PR AUC.
+
+```{r}
+# get probabilities on the test set
+probabilities <- predict(model, newdata = test_data, type = "response")
+
+# make predictions on the test set
+threshold <- 0.5
+predictions <- ifelse(probabilities > threshold, "Yes", "No")
+
+# Ensure predictions and target are factors with the same levels
+predictions <- factor(predictions, levels = c("No", "Yes"))
+actuals <- factor(test_data[[target]], levels = c("No", "Yes"))
+
+# Print the unique predictions and their counts
+cat("Unique predictions: \n", summary(predictions), "\n")
+cat("Actuals summary: \n", summary(actuals), "\n")
+
+# confusion matrix with positive class as "Yes"
+conf_matrix <- confusionMatrix(predictions, actuals, positive = "Yes")
+
+# evaluation metrics
+accuracy <- conf_matrix$overall["Accuracy"]
+precision <- posPredValue(predictions, actuals, positive = "Yes")
+recall <- sensitivity(predictions, actuals, positive = "Yes")
+f1_score <- F1_Score(predictions, actuals, positive = "Yes")
+avg_precision <- PRAUC(probabilities, actuals)
+
+# roc auc
+roc_curve <- roc(actuals, probabilities)
+roc_auc <- roc_curve$auc
+
+# convert the target factor to numeric (0 and 1) for precision-recall calculation
+numeric_flag <- as.numeric(actuals) - 1
+pr_curve <- pr.curve(scores.class0 = probabilities, weights.class0 = numeric_flag, curve = TRUE)
+pr_auc <- pr_curve$auc.integral
+```
+
+Now lets review the model summary and evaluation metrics for the logistic regression model.
+
+```{r}
+# print summary of model
+summary(model)
+```
+
+First we can see the coefficients of the model which are the weights of the features.
+The coefficients are the log odds of the target variable being TRUE given the feature.
+The coefficients can be interpreted as the log odds of the target variable being TRUE when the feature is 1 compared to when the feature is 0.
+We can see the coefficients are all negative which means the log odds of the target variable being TRUE decreases as the feature increases.
+Next we can see the p-values of the coefficients which tell us if the feature is statistically significant in predicting the target variable.
+These statistically significant features are: JURISDICTION_CODE, OCCUR_HOUR, OCCUR_DAY_OF_WEEK, and OCCUR_MONTH.
+
+# Display Evaluation Metrics
+
+Next we print the confusion matrix which is a 2x2 grid of the true positives, false positives, true negatives, and false negatives.
+This allows us to see where the model is correctly predicting the target variable and where it is not.
+We can also breakdown the prediction failures into type I errors (false positives) and type II errors (false negatives).
+We could also adjust the threshold of the model to reduce the number of false positives or false negatives depending on the use case and where we want the model to perform well and where we are fine with errors.
+
+```{r}
+# print confusion matrix
+print(conf_matrix)
+```
+
+Next we print the evaluation metrics which include accuracy, precision, recall, F1 score, ROC AUC, and PR AUC.
+
+```{r}
+# print evaluation metrics
+cat("Accuracy: ", accuracy, "\n")
+cat("Precision: ", precision, "\n")
+cat("Recall: ", recall, "\n")
+cat("F1 Score: ", f1_score, "\n")
+cat("ROC AUC: ", roc_auc, "\n")
+cat("PR AUC: ", pr_auc, "\n")
+```
+
+We can see that the model is not performing great yet with an accuracy of 0.53 which is not far from a random guess.
+We can also see that the recall is much better than the precision. 
+This means the model is better at finding the positive class but it comes at a cost of over predicting the positive class and producing many false positives which results in a low precision score.
+
+# Plot Curves
+
+Next we will plot the ROC curve to visualize the trade off between the true positive rate and false positive rate.
+The ideal ROC curve hugs the top left corner of the plot which would indicate a perfect model.
+The diagonal line represents a random guess model.
+Our model lies somewhere in between those which is not great but not terrible either.
+
+```{r}
+# plot roc curve
+plot(roc_curve, main = paste("ROC Curve (AUC =", round(roc_auc, 2), ")"))
+```
+
+Next we will plot the precision recall curve to visualize the trade off between precision and recall.
+The ideal precision recall curve hugs the top right corner of the plot which would indicate a perfect model.
+We can see that the precision recall curve is much better than the ROC curve which is common for imbalanced data sets.
+
+```{r}
+# plot precision recall curve
+plot(pr_curve, main = paste("Precision-Recall Curve (AUC =", round(pr_auc, 2), ")"))
+```
+
+# Conclusion
+
+In conclusion, we have successfully cleaned the data, visualized the data, analyzed the data, and trained a logistic regression model.
+We have also evaluated the model and displayed the evaluation metrics to understand how well the model is performing.
+We found several features that appeared to show a relationship with the target variable and used those features to train the model.
+Those features included the hour of the day, day of the week, and month of the year, the race, sex, and possibly age of the perpetrator and victim, and the location of the incident.
+However, we were careful not to over generalize the data and make assumptions which might have led to bias in the model's performance.
+Overall the model is not performing great yet with an accuracy of 0.53.
+We also found that the model is better at finding the positive class as indicated by the recall score.
+However, it comes at a cost of over predicting the positive class and producing many false positives which results in a low precision score.
+Some future work could include trying different models, tuning hyperparameters, and engineering new features to improve the model's performance.
+We could also test the assumptions that we were hesitant to make and see if they improve the model's performance.
